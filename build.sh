@@ -29,11 +29,19 @@ echo "Compiling..."
 # -D__USER_DEFAULT_WORKER_POLL_TIMEOUT
 # -D__USER_DEFAULT_CLIENT_KEEP_ALIVE
 # -D__USER_DEFAULT_SERVER_KEEP_ALIVE
+# -D__USER_DEFAULT_CLIENT_TCP_NO_DELAY
+# -D__USER_DEFAULT_SERVER_TCP_NO_DELAY
 
 g++ -Wall \
     -Wextra \
     -gdwarf-4 \
     -std=gnu++17 \
+    -fvar-tracking-assignments \
+    -O0 \
+    -m64 \
+    -mtune=native \
+    -march=native \
+    -mfpmath=sse \
     -lpthread \
     -lm \
     -lc \
@@ -44,6 +52,9 @@ g++ -Wall \
     server_worker.cpp \
     client_worker.cpp \
     worker_worker.cpp \
+    client_logic.cpp \
+    server_logic.cpp \
+    worker_logic.cpp \
     -o "${BINARY_NAME}"
 
 if [ -f "${BINARY_NAME}" ]; then

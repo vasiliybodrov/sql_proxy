@@ -44,6 +44,8 @@ namespace proxy_ns {
         virtual void set_connect_timeout(boost::int32_t value) = 0;
         virtual void set_client_keep_alive(bool value) = 0;
         virtual void set_server_keep_alive(bool value) = 0;
+        virtual void set_client_tcp_no_delay(bool value) = 0;
+        virtual void set_server_tcp_no_delay(bool value) = 0;
 
         virtual boost::uint16_t get_proxy_port(void) const = 0;
         virtual boost::uint16_t get_server_port(void) const = 0;
@@ -52,6 +54,8 @@ namespace proxy_ns {
         virtual boost::int32_t get_connect_timeout(void) const = 0;
         virtual bool get_client_keep_alive(void) const = 0;
         virtual bool get_server_keep_alive(void) const = 0;
+        virtual bool get_client_tcp_no_delay(void) const = 0;
+        virtual bool get_server_tcp_no_delay(void) const = 0;
 			
 		virtual ~Iproxy(void) {}
 	};
@@ -97,6 +101,14 @@ namespace proxy_ns {
             p.get()->set_server_keep_alive(value);
         }
 
+        virtual void set_client_tcp_no_delay(bool value) {
+            p.get()->set_client_tcp_no_delay(value);
+        }
+
+        virtual void set_server_tcp_no_delay(bool value) {
+            p.get()->set_server_tcp_no_delay(value);
+        }
+
         virtual boost::uint16_t get_proxy_port(void) const {
             return p.get()->get_proxy_port();
         }
@@ -125,6 +137,14 @@ namespace proxy_ns {
             return p.get()->get_server_keep_alive();
         }
 
+        virtual bool get_client_tcp_no_delay(void) const {
+            return p.get()->get_client_tcp_no_delay();
+        }
+
+        virtual bool get_server_tcp_no_delay(void) const {
+            return p.get()->get_server_tcp_no_delay();
+        }
+
 		virtual ~proxy(void) {
 		}
 	private:
@@ -148,6 +168,31 @@ namespace proxy_ns {
         virtual ~Eproxy_running() noexcept {}
         virtual char const* what(void) const noexcept {
             static std::string const msg("Proxy already running");
+            return msg.c_str();
+        }
+    };
+
+    class Eproxy_syscall_failed : public IEproxy {
+    public:
+        Eproxy_syscall_failed(void) noexcept :
+            msg("'Some syscall' failed") {}
+        explicit Eproxy_syscall_failed(
+                std::string const& syscall_name) noexcept :
+            msg(syscall_name + " failed") {}
+        virtual ~Eproxy_syscall_failed() noexcept {}
+        virtual char const* what(void) const noexcept {
+            return msg.c_str();
+        }
+    private:
+        std::string const msg;
+    };
+
+    class Eproxy_not_supported : public IEproxy {
+    public:
+        Eproxy_not_supported(void) noexcept {}
+        virtual ~Eproxy_not_supported() noexcept {}
+        virtual char const* what(void) const noexcept {
+            static std::string const msg("Not supported yet");
             return msg.c_str();
         }
     };

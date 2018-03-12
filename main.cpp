@@ -169,6 +169,8 @@ namespace {
         int flag_force;
         int flag_client_keep_alive;
         int flag_server_keep_alive;
+        int flag_client_tcp_no_delay;
+        int flag_server_tcp_no_delay;
         boost::uint16_t proxy_port;
         std::string server_addr;
         boost::uint16_t server_port;
@@ -207,6 +209,12 @@ namespace {
         }
         inline void set_flag_server_keep_alive(char const* value) {
             this->flag_server_keep_alive = boost::lexical_cast<int>(value);
+        }
+        inline void set_flag_client_tcp_no_delay(char const* value) {
+            this->flag_client_tcp_no_delay = boost::lexical_cast<int>(value);
+        }
+        inline void set_flag_server_tcp_no_delay(char const* value) {
+            this->flag_server_tcp_no_delay = boost::lexical_cast<int>(value);
         }
         inline void set_proxy_port(char const* value) {
             this->proxy_port = boost::lexical_cast<boost::uint16_t>(value);
@@ -247,6 +255,8 @@ namespace {
             flag_force(0),
             flag_client_keep_alive(0),
             flag_server_keep_alive(0),
+            flag_client_tcp_no_delay(0),
+            flag_server_tcp_no_delay(0),
             proxy_port(USER_CONFIG_DEFAULT_PROXY_PORT),
             server_addr(USER_CONFIG_DEFAULT_SERVER_ADDR),
             server_port(USER_CONFIG_DEFAULT_SERVER_PORT),
@@ -269,6 +279,8 @@ namespace {
             this->flag_force = 0;
             this->flag_client_keep_alive = 0;
             this->flag_server_keep_alive = 0;
+            this->flag_client_tcp_no_delay = 0;
+            this->flag_server_tcp_no_delay = 0;
             this->proxy_port = 0;
             this->server_addr.clear();
             this->server_port = 0;
@@ -309,6 +321,10 @@ namespace {
             &config.flag_client_keep_alive,  0x01}, // none
         {"server-keep-alive",   no_argument,
             &config.flag_server_keep_alive,  0x01}, // none
+        {"client-tcp-no-delay", no_argument,
+            &config.flag_client_tcp_no_delay,0x01}, // none
+        {"server-tcp-no-delay", no_argument,
+            &config.flag_server_tcp_no_delay,0x01}, // none
         {"port",                required_argument,
             0,                               'p' }, // 'p'
         {"server-port",         required_argument,
@@ -355,6 +371,12 @@ namespace {
                 &config, _1)},
         {"SQLPROXY_FLAG_SERVER_KEEP_ALIVE",
             boost::bind(&configuration::set_flag_server_keep_alive,
+                &config, _1)},
+        {"SQLPROXY_FLAG_CLIENT_TCP_NO_DELAY",
+            boost::bind(&configuration::set_flag_client_tcp_no_delay,
+                &config, _1)},
+        {"SQLPROXY_FLAG_SERVER_TCP_NO_DELAY",
+            boost::bind(&configuration::set_flag_server_tcp_no_delay,
                 &config, _1)},
         {"SQLPROXY_PORT",
             boost::bind(&configuration::set_proxy_port,
@@ -422,6 +444,12 @@ namespace {
         std::cout <<"\t--server-keep-alive\t\t"
                   << "- enable keep-alive for server"
                   << std::endl;
+        std::cout <<"\t--client-tcp-no-delay\t\t"
+                  << "- enable option TCP_NODELAY on clients sockets"
+                  << std::endl;
+        std::cout <<"\t--server-tcp-no-delay\t\t"
+                  << "- enable option TCP_NODELAY on server sockets"
+                  << std::endl;
         std::cout <<"-p\t--port=[PORT]\t\t\t"
                   << "- set proxy port" << std::endl;
         std::cout <<"-d\t--server-port=[PORT]\t\t"
@@ -456,6 +484,10 @@ namespace {
                   << "- same as '--client-keep-alive': {0,1}" << std::endl;
         std::cout << "\tSQLPROXY_FLAG_SERVER_KEEP_ALIVE\t\t"
                   << "- same as '--server-keep-alive': {0,1}" << std::endl;
+        std::cout << "\tSQLPROXY_FLAG_CLIENT_TCP_NO_DELAY\t"
+                  << "- same as '--client-tcp-no-delay': {0,1}" << std::endl;
+        std::cout << "\tSQLPROXY_FLAG_SERVER_TCP_NO_DELAY\t"
+                  << "- same as '--server-tcp-no-delay': {0,1}" << std::endl;
         std::cout << "\tSQLPROXY_PORT\t\t\t\t"
                   << "- same as '-p|--port'" << std::endl;
         std::cout << "\tSQLPROXY_SERVER_ADDR\t\t\t"
@@ -659,6 +691,10 @@ int main(int argc, char** argv) {
                       << config.flag_client_keep_alive << std::endl;
             std::cout << "\tflag_server_keep_alive = "
                       << config.flag_server_keep_alive << std::endl;
+            std::cout << "\tflag_client_tcp_no_delay = "
+                      << config.flag_client_tcp_no_delay << std::endl;
+            std::cout << "\tflag_server_tcp_no_delay = "
+                      << config.flag_server_tcp_no_delay << std::endl;
             std::cout << "\tproxy_port = "
                       << config.proxy_port << std::endl;
             std::cout << "\tserver_addr = "
@@ -740,6 +776,8 @@ int main(int argc, char** argv) {
     p.get()->set_connect_timeout(config.connect_timeout);
     p.get()->set_client_keep_alive(config.flag_client_keep_alive);
     p.get()->set_server_keep_alive(config.flag_server_keep_alive);
+    p.get()->set_client_tcp_no_delay(config.flag_client_tcp_no_delay);
+    p.get()->set_server_tcp_no_delay(config.flag_server_tcp_no_delay);
 
     []()->void {
         std::map<std::string, log_ns::Ilog::level_t> lvl {

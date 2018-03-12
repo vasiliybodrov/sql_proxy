@@ -60,6 +60,10 @@ namespace daemon_ns {
 	void sig_handler_SIGUSR2(int sig, siginfo_t* sinfo, void* buf);
     void sig_handler_SIGPIPE(int sig, siginfo_t* sinfo, void* buf);
     void sig_handler_SIGINT(int sig, siginfo_t* sinfo, void* buf);
+    void sig_handler_SIGABRT(int sig, siginfo_t* sinfo, void* buf);
+    void sig_handler_SIGTERM(int sig, siginfo_t* sinfo, void* buf);
+    void sig_handler_SIGQUIT(int sig, siginfo_t* sinfo, void* buf);
+    void sig_handler_SIGHUP(int sig, siginfo_t* sinfo, void* buf);
 	
 	bool daemon::used = false;
 	
@@ -321,10 +325,14 @@ namespace daemon_ns {
 				this->setsignal(SIGUSR2, sig_handler_SIGUSR2);
                 this->setsignal(SIGPIPE, sig_handler_SIGPIPE);
                 this->setsignal(SIGINT, sig_handler_SIGINT);
+                this->setsignal(SIGABRT, sig_handler_SIGABRT);
+                this->setsignal(SIGTERM, sig_handler_SIGTERM);
+                this->setsignal(SIGQUIT, sig_handler_SIGQUIT);
+                this->setsignal(SIGHUP, sig_handler_SIGHUP);
 			}
 			while(0);
 		}
-        catch(std::bad_alloc&) {
+        catch(std::bad_alloc const&) {
             result = self::RES_MEMORY_ERROR;
         }
 		catch(...) {
@@ -416,7 +424,38 @@ namespace daemon_ns {
 
         ::program_exit(EXIT_SUCCESS);
     }
-	
+
+    void sig_handler_SIGABRT(int sig, siginfo_t* sinfo, void* buf) {
+        boost::ignore_unused(sig, sinfo, buf);
+
+        log::inst()(Ilog::LEVEL_DEBUG, "Signal received: SIGABRT");
+
+        ::program_exit(EXIT_SUCCESS);
+        //::_program_exit(EXIT_SUCCESS);
+    }
+
+    void sig_handler_SIGTERM(int sig, siginfo_t* sinfo, void* buf) {
+        boost::ignore_unused(sig, sinfo, buf);
+
+        log::inst()(Ilog::LEVEL_DEBUG, "Signal received: SIGTERM");
+
+        ::program_exit(EXIT_SUCCESS);
+    }
+
+    void sig_handler_SIGQUIT(int sig, siginfo_t* sinfo, void* buf) {
+        boost::ignore_unused(sig, sinfo, buf);
+
+        log::inst()(Ilog::LEVEL_DEBUG, "Signal received: SIGQUIT");
+
+        ::program_exit(EXIT_SUCCESS);
+    }
+
+    void sig_handler_SIGHUP(int sig, siginfo_t* sinfo, void* buf) {
+        boost::ignore_unused(sig, sinfo, buf);
+
+        log::inst()(Ilog::LEVEL_DEBUG, "Signal received: SIGHUP");
+    }
+
 } // namespace daemon
 
 /* *****************************************************************************

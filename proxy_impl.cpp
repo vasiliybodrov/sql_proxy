@@ -37,16 +37,21 @@
 #include <algorithm>
 #include <iterator>
 #include <sstream>
+#include <iostream>
+#include <fstream>
 #include <mutex>
 #include <cerrno>
 #include <cstring>
 #include <cassert>
 #include <ios>
 #include <iomanip>
+#include <functional>
 
 #include <boost/make_shared.hpp>
 #include <boost/cstdint.hpp>
 #include <boost/core/ignore_unused.hpp>
+#include <boost/lexical_cast.hpp>
+#include <boost/algorithm/string.hpp>
 #ifdef USE_FULL_DEBUG
 //#include <boost/stacktrace.hpp> // TODO: Доделать бэктрейс на буст
 #endif // USE_FULL_DEBUG
@@ -54,10 +59,12 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#include <sys/utsname.h>
 #include <arpa/inet.h>
 #include <poll.h>
 #include <sys/time.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -104,7 +111,44 @@
 #define __USER_DEFAULT_SERVER_KEEP_ALIVE 0
 #endif // __USER_DEFAULT_SERVER_KEEP_ALIVE
 
+#ifndef __USER_DEFAULT_CLIENT_TCP_NO_DELAY
+#define __USER_DEFAULT_CLIENT_TCP_NO_DELAY 0
+#endif // __USER_DEFAULT_CLIENT_TCP_NO_DELAY
+
+#ifndef __USER_DEFAULT_SERVER_TCP_NO_DELAY
+#define __USER_DEFAULT_SERVER_TCP_NO_DELAY 0
+#endif // __USER_DEFAULT_SERVER_TCP_NO_DELAY
+
 namespace proxy_ns {
+    namespace {
+        size_t __set_max_pipe_size_helper(int fd,
+                                          size_t cur_size,
+                                          size_t set_size,
+                                          size_t min_size,
+                                          size_t step) {
+            size_t new_cur_size = set_size;
+            int rc = 0;
+
+            if(set_size < min_size) {
+                return cur_size;
+            }
+
+            rc = ::fcntl(fd, F_SETPIPE_SZ, new_cur_size);
+            if(rc >= 0) {
+                return new_cur_size;
+            }
+            else {
+                std::cout << strerror(errno) << std::endl;
+            }
+
+            return __set_max_pipe_size_helper(fd,
+                                              cur_size,
+                                              new_cur_size - step,
+                                              min_size,
+                                              step);
+        }
+    }
+
 	using namespace log_ns;
 
     extern void* client_worker(void* arg);
@@ -159,6 +203,12 @@ namespace proxy_ns {
 
     bool const proxy_impl::DEFAULT_SERVER_KEEP_ALIVE =
             __USER_DEFAULT_SERVER_KEEP_ALIVE;
+
+    bool const proxy_impl::DEFAULT_CLIENT_TCP_NO_DELAY =
+            __USER_DEFAULT_CLIENT_TCP_NO_DELAY;
+
+    bool const proxy_impl::DEFAULT_SERVER_TCP_NO_DELAY =
+            __USER_DEFAULT_SERVER_TCP_NO_DELAY;
 
     data::data(void) {
         this->direction = DIRECTION_UNKNOWN;
@@ -282,7 +332,7 @@ namespace proxy_ns {
     ///
     /// \brief proxy_impl::proxy_impl
     ///
-	proxy_impl::proxy_impl(void) :
+        proxy_impl::proxy_impl(void) :
 		Iproxy_impl(),
 		s_last_err(RES_CODE_UNKNOWN),
 		c_last_err(RES_CODE_UNKNOWN),
@@ -297,9 +347,77 @@ namespace proxy_ns {
         connect_timeout(self::DEFAULT_CONNECT_TIMEOUT),
         client_keep_alive(self::DEFAULT_CLIENT_KEEP_ALIVE),
         server_keep_alive(self::DEFAULT_SERVER_KEEP_ALIVE),
+        client_tcp_no_delay(self::DEFAULT_CLIENT_TCP_NO_DELAY),
+        server_tcp_no_delay(self::DEFAULT_SERVER_TCP_NO_DELAY),
         s_thread(0),
         c_thread(0),
-        w_thread(0) {
+        w_thread(0),
+        use_pipe(0),
+        pipe_reserved_percent(50),
+        pipe_reserved_size(0),
+        max_pipe_data_size(0),
+        max_pipe_size(0),
+        max_pipe_size_system(0) {
+
+        std::function<size_t(std::string const&)> f_get_max_system_size =
+                [](std::string const& procfilename) -> size_t {
+            size_t res = 0;
+            struct utsname name;
+            int rc = 0;
+
+            rc = ::uname(&name);
+            if(rc < 0) {
+            }
+            else {
+                /*
+                 * TODO: RU: Механизм определения версии ядра Linux, с целью
+                 * определения файла, из которого считывать значние не доделан.
+                 * В дальнейшем, необходимо реализовать.
+                std::string release = name.release;
+                std::string delimiter1 = "-";
+                std::string kernel_version =
+                    release.substr(0, release.find(delimiter1));
+
+                std::vector<std::string> vec_krnl_ver;
+                boost::split(vec_krnl_ver, kernel_version, [](char c) {
+                    return (c == '.');
+                });
+
+                std::for_each(vec_krnl_ver.begin(), vec_krnl_ver.end(),
+                              [](auto s) {
+                    std::cout << s << std::endl;
+                });
+                */
+
+                std::ifstream procfile (procfilename);
+                std::string line;
+                if(procfile.is_open()) {
+                    std::getline(procfile, line);
+                    procfile.close();
+
+                    try {
+                        res = boost::lexical_cast<size_t>(line);
+                    }
+                    catch(boost::bad_lexical_cast const&) {
+                        res = 0;
+                    }
+                    catch(...) {
+                        res = 0;
+                    }
+                }
+            }
+            return res;
+        };
+
+        // TODO: для сокетов получать максимальное значение действительно,
+        //       а затем пытаться выставить это значние.
+        //       Сейчас берётся значение по-умолчанию и оно считается
+        //       максимальным.
+        this->max_pipe_size_system = (this->use_pipe) ?
+            f_get_max_system_size("/proc/sys/fs/pipe-max-size") :
+                std::min(
+                    f_get_max_system_size("/proc/sys/net/core/rmem_default"),
+                    f_get_max_system_size("/proc/sys/net/core/wmem_default"));
 	}
 	
     ///
@@ -309,40 +427,169 @@ namespace proxy_ns {
 	result_t proxy_impl::run(void) {
         std::lock_guard<std::mutex> lock(this->run_mutex);
 
-		log& l = log::inst();
+        log_ns::log& l = log_ns::log::inst();
 		
+        size_t res_pipe_size = 0;
 		int rc = 0;
 
-        rc = ::pipe(this->pipe_sc_pd);
+        rc = this->pipe_create(this->pipe_sc_pd);
 		if(rc < 0) {
 			l(Ilog::LEVEL_ERROR, "'pipe' error");
 		}
 
-        rc = ::pipe(this->pipe_cs_pd);
+        rc = this->pipe_create(this->pipe_cs_pd);
         if(rc < 0) {
             l(Ilog::LEVEL_ERROR, "'pipe' error");
         }
 
-        rc = ::pipe(this->pipe_sw_pd);
+        rc = this->pipe_create(this->pipe_sw_pd);
 		if(rc < 0) {
 			l(Ilog::LEVEL_ERROR, "'pipe' error");
 		}
 
-        rc = ::pipe(this->pipe_ws_pd);
+        rc = this->pipe_create(this->pipe_ws_pd);
         if(rc < 0) {
             l(Ilog::LEVEL_ERROR, "'pipe' error");
         }
 
-        rc = ::pipe(this->pipe_cw_pd);
+        rc = this->pipe_create(this->pipe_cw_pd);
 		if(rc < 0) {
 			l(Ilog::LEVEL_ERROR, "'pipe' error");
 		}
 
-        rc = ::pipe(this->pipe_wc_pd);
+        rc = this->pipe_create(this->pipe_wc_pd);
         if(rc < 0) {
             l(Ilog::LEVEL_ERROR, "'pipe' error");
         }
 		
+        if(this->use_pipe) {
+            res_pipe_size = this->set_max_pipe_size(this->pipe_sc_pd[1]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_sc_pd): ") +
+              std::to_string(res_pipe_size));
+        }
+        else {
+            res_pipe_size = this->set_max_pipe_size(this->pipe_sc_pd[0]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_sc_pd[0]): ") +
+              std::to_string(res_pipe_size));
+
+            res_pipe_size = this->set_max_pipe_size(this->pipe_sc_pd[1]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_sc_pd[1]): ") +
+              std::to_string(res_pipe_size));
+        }
+
+        if(this->use_pipe) {
+            res_pipe_size = this->set_max_pipe_size(this->pipe_cs_pd[1]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_cs_pd): ") +
+              std::to_string(res_pipe_size));
+        }
+        else {
+            res_pipe_size = this->set_max_pipe_size(this->pipe_cs_pd[0]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_cs_pd[0]): ") +
+              std::to_string(res_pipe_size));
+
+            res_pipe_size = this->set_max_pipe_size(this->pipe_cs_pd[1]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_cs_pd[1]): ") +
+              std::to_string(res_pipe_size));
+        }
+
+        if(this->use_pipe) {
+            res_pipe_size = this->set_max_pipe_size(this->pipe_sw_pd[1]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_sw_pd): ") +
+              std::to_string(res_pipe_size));
+        }
+        else {
+            res_pipe_size = this->set_max_pipe_size(this->pipe_sw_pd[0]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_sw_pd[0]): ") +
+              std::to_string(res_pipe_size));
+
+            res_pipe_size = this->set_max_pipe_size(this->pipe_sw_pd[1]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_sw_pd[1]): ") +
+              std::to_string(res_pipe_size));
+        }
+
+        if(this->use_pipe) {
+            res_pipe_size = this->set_max_pipe_size(this->pipe_ws_pd[1]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_ws_pd): ") +
+              std::to_string(res_pipe_size));
+        }
+        else {
+            res_pipe_size = this->set_max_pipe_size(this->pipe_ws_pd[0]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_ws_pd[0]): ") +
+              std::to_string(res_pipe_size));
+
+            res_pipe_size = this->set_max_pipe_size(this->pipe_ws_pd[1]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_ws_pd[1]): ") +
+              std::to_string(res_pipe_size));
+        }
+
+        if(this->use_pipe) {
+            res_pipe_size = this->set_max_pipe_size(this->pipe_cw_pd[1]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_cw_pd): ") +
+              std::to_string(res_pipe_size));
+        }
+        else {
+            res_pipe_size = this->set_max_pipe_size(this->pipe_cw_pd[0]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_cw_pd[0]): ") +
+              std::to_string(res_pipe_size));
+
+            res_pipe_size = this->set_max_pipe_size(this->pipe_cw_pd[1]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_cw_pd[1]): ") +
+              std::to_string(res_pipe_size));
+        }
+
+        if(this->use_pipe) {
+            res_pipe_size = this->set_max_pipe_size(this->pipe_wc_pd[1]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_wc_pd): ") +
+              std::to_string(res_pipe_size));
+        }
+        else {
+            res_pipe_size = this->set_max_pipe_size(this->pipe_wc_pd[0]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_wc_pd[0]): ") +
+              std::to_string(res_pipe_size));
+
+            res_pipe_size = this->set_max_pipe_size(this->pipe_wc_pd[1]);
+            l(Ilog::LEVEL_DEBUG,
+              std::string("Pipe buffer size (pipe_wc_pd[1]): ") +
+              std::to_string(res_pipe_size));
+        }
+
+        l(Ilog::LEVEL_DEBUG,
+          std::string("Pipe buffer size (max system [bytes]): ") +
+          std::to_string(this->max_pipe_size_system));
+
+        l(Ilog::LEVEL_DEBUG,
+          std::string("Pipe buffer size (reserved [percent]): ") +
+          std::to_string(this->pipe_reserved_percent));
+
+        l(Ilog::LEVEL_DEBUG,
+          std::string("Pipe buffer size (reserved [bytes]): ") +
+          std::to_string(this->pipe_reserved_size));
+
+        l(Ilog::LEVEL_DEBUG,
+          std::string("Pipe buffer size (max current [bytes]): ") +
+          std::to_string(this->max_pipe_size));
+
+        l(Ilog::LEVEL_DEBUG,
+          std::string("Pipe buffer size (max for data [bytes]): ") +
+          std::to_string(this->max_pipe_data_size));
+
 		this->server_run();
 		this->client_run();
 		this->worker_run();
@@ -351,15 +598,24 @@ namespace proxy_ns {
 		if(!rc) {
 			l(Ilog::LEVEL_ERROR, "'pthread_join' failed (server thread)");
 		}
+        else {
+            l(Ilog::LEVEL_DEBUG, "'pthread_join' ok (server thread)");
+        }
 
         rc = ::pthread_join(this->c_thread, nullptr);
         if(!rc) {
             l(Ilog::LEVEL_ERROR, "'pthread_join' failed (client thread)");
         }
+        else {
+            l(Ilog::LEVEL_DEBUG, "'pthread_join' ok (client thread)");
+        }
 
         rc = ::pthread_join(this->w_thread, nullptr);
         if(!rc) {
             l(Ilog::LEVEL_ERROR, "'pthread_join' failed (worker thread)");
+        }
+        else {
+            l(Ilog::LEVEL_DEBUG, "'pthread_join' ok (worker thread)");
         }
 
         (void) ::close(this->pipe_sc_pd[0]);
@@ -465,6 +721,26 @@ namespace proxy_ns {
         }
     }
 
+    void proxy_impl::set_client_tcp_no_delay(bool value) {
+        if(this->run_mutex.try_lock()) {
+            this->client_tcp_no_delay = value;
+            this->run_mutex.unlock();
+        }
+        else {
+            throw Eproxy_running();
+        }
+    }
+
+    void proxy_impl::set_server_tcp_no_delay(bool value) {
+        if(this->run_mutex.try_lock()) {
+            this->server_tcp_no_delay = value;
+            this->run_mutex.unlock();
+        }
+        else {
+            throw Eproxy_running();
+        }
+    }
+
     boost::uint16_t proxy_impl::get_proxy_port(void) const {
         if(this->run_mutex.try_lock()) {
             this->run_mutex.unlock();
@@ -544,6 +820,26 @@ namespace proxy_ns {
         }
     }
 
+    bool proxy_impl::get_client_tcp_no_delay(void) const {
+        if(this->run_mutex.try_lock()) {
+            this->run_mutex.unlock();
+            return this->client_tcp_no_delay;
+        }
+        else {
+            throw Eproxy_running();
+        }
+    }
+
+    bool proxy_impl::get_server_tcp_no_delay(void) const {
+        if(this->run_mutex.try_lock()) {
+            this->run_mutex.unlock();
+            return this->server_tcp_no_delay;
+        }
+        else {
+            throw Eproxy_running();
+        }
+    }
+
     ///
     /// \brief proxy_impl::~proxy_impl
     ///
@@ -613,10 +909,125 @@ namespace proxy_ns {
         }
 	}
 
-    result_t proxy_impl::set_nonblock(int fd,
-                                      std::function<void (int, int)> ferr) const
-    {
-        log& l = log::inst();
+    int proxy_impl::pipe_create(int* d) {
+        if(this->use_pipe) {
+            return ::pipe(d);
+        }
+        else {
+            return ::socketpair(AF_UNIX, SOCK_STREAM, 0, d);
+        }
+    }
+
+    size_t proxy_impl::set_max_pipe_size(int pipe_fd) {
+        if(this->use_pipe) {
+            ssize_t default_max_pipe_size = 0;
+
+            default_max_pipe_size = ::fcntl(pipe_fd, F_GETPIPE_SZ);
+            if(default_max_pipe_size < 0) {
+                throw Eproxy_syscall_failed("'fcntl' (F_GETPIPE_SZ)");
+            }
+
+            this->max_pipe_size = default_max_pipe_size;
+            this->max_pipe_size = __set_max_pipe_size_helper(pipe_fd,
+                                             default_max_pipe_size,
+                                             this->max_pipe_size_system,
+                                             default_max_pipe_size,
+                                             1024);
+        }
+        else {
+            // RU: В настоящее время для сокета ничего не меняем.
+            //     Оставляем значение, которое было получено как
+            //     "значение по-умолчанию".
+            //     this->max_pipe_size_system - содержит не максимальное,
+            //     а минимальное из текущих значение (для чтения и записи).
+            this->max_pipe_size = this->max_pipe_size_system;
+        }
+
+        this->pipe_reserved_size = (this->max_pipe_size / 100) *
+                this->pipe_reserved_percent;
+
+        this->max_pipe_data_size = this->max_pipe_size -
+                this->pipe_reserved_size;
+
+        return this->max_pipe_size;
+    }
+
+    size_t proxy_impl::set_max_pipe_size_force(int pipe_fd, size_t new_size) {
+        if(this->use_pipe) {
+            int rc = ::fcntl(pipe_fd, F_SETPIPE_SZ, &new_size);
+            if(rc < 0) {
+                throw Eproxy_syscall_failed("'fcntl' (F_SETPIPE_SZ)");
+            }
+
+            this->max_pipe_size = new_size;
+        }
+        else {
+            throw Eproxy_not_supported();
+        }
+
+        this->pipe_reserved_size = (this->max_pipe_size / 100) *
+                this->pipe_reserved_percent;
+
+        this->max_pipe_data_size = this->max_pipe_size -
+                this->pipe_reserved_size;
+
+        return this->max_pipe_size;
+    }
+
+    size_t proxy_impl::get_data_size_in_pipe(int pipe_fd) const {
+        size_t count_bytes = 0;
+        int rc = 0;
+
+        rc = ::ioctl(pipe_fd, FIONREAD, &count_bytes);
+        if(rc < 0) {
+            count_bytes = 0;
+            throw Eproxy_syscall_failed("'ioctl' (FIONREAD)");
+        }
+
+        return count_bytes;
+    }
+
+    bool proxy_impl::can_write_to_pipe_universal(int pipe_w_fd,
+                                                 size_t max_size,
+                                                 size_t size) const {
+        size_t count_bytes = 0;
+        bool ret = false;
+        int rc = 0;
+
+        rc = ::ioctl(pipe_w_fd, FIONREAD, &count_bytes);
+        if(rc < 0) {
+            ret = false;
+        }
+        else {
+            ret = (size <= (max_size - count_bytes));
+        }
+
+        return ret;
+    }
+
+    bool proxy_impl::can_write_to_pipe(int pipe_w_fd, size_t size) const {
+        return this->can_write_to_pipe_universal(pipe_w_fd,
+                                                 this->max_pipe_size,
+                                                 size);
+    }
+
+    bool proxy_impl::can_write_to_pipe_data(int pipe_w_fd, size_t size) const {
+        return this->can_write_to_pipe_universal(pipe_w_fd,
+                                                 this->max_pipe_data_size,
+                                                 size);
+    }
+
+    ///
+    /// \brief proxy_impl::set_nonblock
+    /// \param fd
+    /// \param ferr
+    /// \return
+    ///
+    result_t proxy_impl::set_nonblock(int sd,
+                                      std::function<void (int)> fok,
+                                      std::function<void (int, int)> ferr)
+    const {
+        log_ns::log& l = log_ns::log::inst();
 
         result_t ret = RES_CODE_UNKNOWN;
 
@@ -624,28 +1035,184 @@ namespace proxy_ns {
         int rc = 0;
         int on = 1;
 
+        ret = RES_CODE_OK;
+
         on = 1;
-        rc = ::ioctl(fd, FIONBIO, reinterpret_cast<char*>(&on));
+        rc = ::ioctl(sd, FIONBIO, reinterpret_cast<char*>(&on));
         if(rc < 0) {
             l(Ilog::LEVEL_ERROR,"'ioctl' error");
             ret = RES_CODE_ERROR;
-            ferr(fd, errno);
+            ferr(rc, errno);
         }
         else {
-            flags = ::fcntl(fd, F_GETFL, 0);
-            rc = ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+            flags = ::fcntl(sd, F_GETFL, 0);
+            rc = ::fcntl(sd, F_SETFL, flags | O_NONBLOCK);
             if(rc < 0) {
                 l(Ilog::LEVEL_ERROR,"'fcntl' error");
                 ret = RES_CODE_ERROR;
-                ferr(fd, errno);
+                ferr(rc, errno);
+            }
+            else {
+                fok(rc);
             }
         }
-
-        ret = RES_CODE_OK;
 
         return ret;
     }
 
+    ///
+    /// \brief proxy_impl::set_reuseaddr
+    /// \param sd
+    /// \param fok
+    /// \param ferr
+    /// \return
+    ///
+    result_t proxy_impl::set_reuseaddr(int sd, bool val,
+                                       std::function<void (int)> fok,
+                                       std::function<void (int, int)> ferr)
+    const{
+        result_t ret = RES_CODE_UNKNOWN;
+
+        int rc = 0;
+        int optval_reuseaddr = val ? 1 : 0;
+        socklen_t optlen_reuseaddr = sizeof(optval_reuseaddr);
+
+        rc = ::setsockopt(sd,
+                          SOL_SOCKET,
+                          SO_REUSEADDR,
+                          &optval_reuseaddr,
+                          optlen_reuseaddr);
+        if(rc < 0) {
+            ret = RES_CODE_ERROR;
+            ferr(rc, errno);
+        }
+        else {
+            ret = RES_CODE_OK;
+            fok(rc);
+        }
+
+        return ret;
+    }
+
+    ///
+    /// \brief proxy_impl::set_keep_alive
+    /// \param sd
+    /// \param val
+    /// \param fok
+    /// \param ferr
+    /// \return
+    ///
+    result_t proxy_impl::set_keep_alive(int sd, bool val,
+                                        std::function<void (int)> fok,
+                                        std::function<void (int, int)> ferr)
+    const {
+        result_t ret = RES_CODE_UNKNOWN;
+
+        int rc = 0;
+        int optval_keep_alive = val ? 1 : 0;
+        socklen_t optlen_keep_alive = sizeof(optval_keep_alive);
+
+        rc = ::setsockopt(sd,
+                          SOL_SOCKET,
+                          SO_KEEPALIVE,
+                          &optval_keep_alive,
+                          optlen_keep_alive);
+        if(rc < 0) {
+            ret = RES_CODE_ERROR;
+            ferr(rc, errno);
+        }
+        else {
+            ret = RES_CODE_OK;
+            fok(rc);
+        }
+
+        return ret;
+    }
+
+    result_t proxy_impl::set_tcp_no_delay(int sd, bool val,
+                                          std::function<void (int)> fok,
+                                          std::function<void (int, int)> ferr)
+    const {
+        result_t ret = RES_CODE_UNKNOWN;
+
+        int rc = 0;
+        int optval_tcp_no_delay = val ? 1 : 0;
+        socklen_t optlen_tcp_no_delay = sizeof(optval_tcp_no_delay);
+
+        rc = ::setsockopt(sd,
+                          IPPROTO_TCP,
+                          TCP_NODELAY,
+                          &optval_tcp_no_delay,
+                          optlen_tcp_no_delay);
+
+        if(rc < 0) {
+            ret = RES_CODE_ERROR;
+            ferr(rc, errno);
+        }
+        else {
+            ret = RES_CODE_OK;
+            fok(rc);
+        }
+
+        return ret;
+    }
+
+    result_t proxy_impl::get_keep_alive(int sd, int& val,
+                            std::function<void (int)> fok,
+                            std::function<void (int, int)> ferr) const {
+        result_t ret = RES_CODE_UNKNOWN;
+
+        int rc = 0;
+        socklen_t optlen_keep_alive = sizeof(val);
+
+        rc = ::getsockopt(sd,
+                          SOL_SOCKET,
+                          SO_KEEPALIVE,
+                          &val,
+                          &optlen_keep_alive);
+        if(rc < 0) {
+            ret = RES_CODE_ERROR;
+            ferr(rc, errno);
+        }
+        else {
+            ret = RES_CODE_OK;
+            fok(rc);
+        }
+
+        return ret;
+    }
+
+    result_t proxy_impl::get_tcp_no_delay(int sd, int& val,
+                              std::function<void (int)> fok,
+                              std::function<void (int, int)> ferr) const {
+        result_t ret = RES_CODE_UNKNOWN;
+
+        int rc = 0;
+        socklen_t optlen_tcp_no_delay = sizeof(val);
+
+        rc = ::getsockopt(sd,
+                          IPPROTO_TCP,
+                          TCP_NODELAY,
+                          &val,
+                          &optlen_tcp_no_delay);
+
+        if(rc < 0) {
+            ret = RES_CODE_ERROR;
+            ferr(rc, errno);
+        }
+        else {
+            ret = RES_CODE_OK;
+            fok(rc);
+        }
+
+        return ret;
+    }
+
+    ///
+    /// \brief proxy_impl::debug_log_info
+    /// \param d
+    /// \param who
+    ///
     void proxy_impl::debug_log_info(data const& d, std::string const& who) const
     {
 #ifdef USE_FULL_DEBUG
@@ -728,6 +1295,7 @@ namespace proxy_ns {
         boost::ignore_unused(d, who);
 #endif // USE_FULL_DEBUG
     }
+
 } // namespace proxy_ns
 
 /* *****************************************************************************
